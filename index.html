@@ -26,12 +26,9 @@
     <!-- Load Firebase CDN Modules -->
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
-        import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
         import { getFirestore, collection, addDoc, query, orderBy, onSnapshot, serverTimestamp, doc, getDoc, setDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
-        import { setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore-lite.js";
-
-        // Set log level to only show errors to keep the console clean
-        setLogLevel('error');
+        // Removed setLogLevel import as it was causing a console warning
 
         // Global Firebase variables will be set in the IIFE below
         let db, auth, userId = null;
@@ -51,39 +48,39 @@
 
         // --- Firebase Core Setup and Auth (Encapsulated) ---
         (async function initFirebase() {
-            // --- HARD-CODED FIREBASE CONFIGURATION ---
-            // This configuration uses the keys you provided. 
-            const firebaseConfig = {
-                apiKey: "AIzaSyCYjp_KTHFc8zAdf4WAbXtNjw-WGJIjE6A",
-                authDomain: "off-the-job-log.firebaseapp.com",
-                projectId: "off-the-job-log",
-                storageBucket: "off-the-job-log.firebasestorage.app",
-                messagingSenderId: "543791232927",
-                appId: "1:543791232927:web:cb2113616fdfca509c6faa",
-                measurementId: "G-XJ7DDG1D1T"
-            };
-            
-            // Check config explicitly before proceeding
+            // --- MANDATORY FIREBASE CONFIGURATION USING GLOBAL VARIABLES ---
+            const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+            let firebaseConfig = null;
+            try {
+                firebaseConfig = JSON.parse(__firebase_config);
+            } catch (e) {
+                console.error("Firebase config parsing failed:", e);
+                showNotification("Critical Error: Firebase configuration is invalid.", true);
+                return;
+            }
+
             if (!firebaseConfig || !firebaseConfig.apiKey) {
-                // If the config object is somehow undefined or missing critical info, display the error.
-                const appEl = document.getElementById('app');
-                if (appEl) {
-                    appEl.innerHTML = '<p class="text-red-600 p-4 text-center">Firebase configuration is missing. Cannot initialize database.</p>';
-                }
+                showNotification("Critical Error: Firebase configuration is missing.", true);
                 return;
             }
             
-            appId = firebaseConfig.projectId; 
-
             try {
-                console.log("Attempting Firebase initialization with project ID:", appId);
+                console.log("Attempting Firebase initialization with app ID:", appId);
                 const app = initializeApp(firebaseConfig);
                 db = getFirestore(app);
                 auth = getAuth(app);
                 
-                // Sign in anonymously immediately, as this app is intended for general public use on GitHub Pages
-                await signInAnonymously(auth);
+                // 1. Authenticate using the provided token or anonymously
+                const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+                
+                if (initialAuthToken) {
+                    await signInWithCustomToken(auth, initialAuthToken);
+                } else {
+                    // Fallback to anonymous sign-in if no custom token is provided
+                    await signInAnonymously(auth);
+                }
 
+                // 2. Set up the state change listener
                 onAuthStateChanged(auth, async (user) => {
                     const userIdEl = document.getElementById('userIdDisplay');
                     
@@ -91,25 +88,26 @@
                         userId = user.uid;
                         isAuthReady = true;
                         if (userIdEl) userIdEl.textContent = `User ID: ${userId}`;
-                        await getMetadata(); // Load metadata first
+                        // Now that we have a user, load metadata and setup listeners
+                        await getMetadata(); 
                         setupListeners();
                     } else {
                         userId = null;
                         isAuthReady = true;
-                        console.log("No user signed in. Using anonymous sign-in attempt...");
                         if (userIdEl) userIdEl.textContent = `User ID: (Unauthenticated)`;
                         showNotification("Authentication failed. Please refresh.", true);
                     }
                     state.loading = false;
-                    updateUI();
+                    updateUI(); // Initial UI update after auth check
                 });
                 
             } catch (e) {
                 console.error("Firebase initialization failed:", e);
-                showNotification(`Initialization Error: ${e.message}`, true);
+                // Specifically targeting the configuration-not-found error with better logging
+                showNotification(`Initialization Error: ${e.message}. The Firebase configuration is likely incorrect.`, true);
                 const appEl = document.getElementById('app');
                 if (appEl) {
-                    appEl.innerHTML = `<p class="text-red-600 p-4 text-center">Initialization Error: ${e.message}. Check browser console for details.</p>`;
+                    appEl.innerHTML = `<div class="p-8 text-center"><p class="text-red-600 font-bold">Initialization Error</p><p>${e.message}</p></div>`;
                 }
             }
         })();
@@ -118,7 +116,7 @@
         // --- Utility Functions ---
         
         function getCollectionPath() {
-            // Note: Data is stored in a custom path using the Project ID as the App ID.
+            // Use the determined appId and userId for the path
             return `artifacts/${appId}/users/${userId}/job_logs`;
         }
         
@@ -168,14 +166,17 @@
             if (logEntryTab) {
                 logEntryTab.classList.toggle('border-blue-500', state.activeTab === 'logEntry');
                 logEntryTab.classList.toggle('text-blue-600', state.activeTab === 'logEntry');
+                logEntryTab.classList.toggle('border-transparent', state.activeTab !== 'logEntry');
             }
             if (importTab) {
                 importTab.classList.toggle('border-blue-500', state.activeTab === 'importData');
                 importTab.classList.toggle('text-blue-600', state.activeTab === 'importData');
+                importTab.classList.toggle('border-transparent', state.activeTab !== 'importData');
             }
             if (summaryTab) {
                 summaryTab.classList.toggle('border-blue-500', state.activeTab === 'summary');
                 summaryTab.classList.toggle('text-blue-600', state.activeTab === 'summary');
+                summaryTab.classList.toggle('border-transparent', state.activeTab !== 'summary');
             }
 
 
@@ -515,7 +516,7 @@
                     const SEARCH_KEYS = {
                         date: ['date'],
                         hours: ['hours', 'hr', 'off-the-job hours'],
-                        agreedHrs: ['agreed hrs', 'agreedhrs', 'total otj required', 'totalhrs', 'calculated minimum hrs']
+                        agreedHrs: ['agreed hrs', 'agreedhrs', 'total otj required', 'totalhrs', 'calculated minimum hrs', '360 hrs needed', 'total otj hours']
                     };
 
                     // Function to normalize a cell value for comparison
@@ -526,6 +527,7 @@
                         const row = json[i];
                         const rowKeys = row.map(normalizeCell);
                         
+                        // Check if row contains a Date key AND an Hours key
                         const hasDate = rowKeys.some(key => SEARCH_KEYS.date.some(sk => key.includes(sk)));
                         const hasHours = rowKeys.some(key => SEARCH_KEYS.hours.some(sk => key.includes(sk)));
                         
@@ -578,7 +580,7 @@
                     
                     // 3. Process job log data
                     const headers = json[headerRowIndex];
-                    let dateCol = -1, descCol = -1, hoursCol = -1;
+                    let dateCol = -1, descCol = -1, hoursCol = -1, jobIdCol = -1; // Added jobIdCol
                     
                     // Identify column indices based on normalized headers
                     headers.forEach((header, index) => {
@@ -589,9 +591,12 @@
                             descCol = index;
                         } else if (SEARCH_KEYS.hours.some(key => normalizedHeader.includes(key))) {
                             hoursCol = index;
+                        } else if (normalizedHeader.includes('jobid') || normalizedHeader.includes('projectid')) { // Added Job ID check
+                            jobIdCol = index;
                         }
                     });
                     
+                    // Note: Activity Description is often the second column in your CSV, which is column index 1.
                     if (dateCol === -1 || descCol === -1 || hoursCol === -1) {
                         showNotification("Import failed: Could not map 'Date', 'Activity Description', and 'Hours' columns in the header row.", true);
                         return;
@@ -607,10 +612,10 @@
 
                         const date = row[dateCol] ? String(row[dateCol]).trim() : '';
                         const description = row[descCol] ? String(row[descCol]).trim() : '';
-                        // Clean up hours string: replace comma with dot, remove non-numeric except dot
                         const hoursStr = row[hoursCol] ? String(row[hoursCol]).trim().replace(',', '.') : '0';
+                        const jobId = jobIdCol !== -1 && row[jobIdCol] ? String(row[jobIdCol]).trim() : 'N/A';
                         
-                        jobData.push({ date, description, hoursStr });
+                        jobData.push({ date, description, hoursStr, jobId });
                     }
                     
                     let successCount = 0;
@@ -618,7 +623,6 @@
                     
                     // 4. Upload to Firestore
                     for (const item of jobData) {
-                        const jobId = 'N/A';
                         const description = item.description;
                         const hours = parseFloat(item.hoursStr) || 0; 
                         const date = item.date;
@@ -626,7 +630,7 @@
                         if (description && hours > 0 && date && Date.parse(date)) {
                             try {
                                 const logEntry = {
-                                    jobId: jobId,
+                                    jobId: item.jobId,
                                     description: description,
                                     offTheJobHours: hours,
                                     date: date, 
@@ -770,7 +774,7 @@
                     Upload your Excel workbook (.xlsx or .xls). The app will process the **first sheet**.
                 </p>
                 <p class="text-sm text-yellow-700 mt-1">
-                    It will automatically find the **Date**, **Activity Description**, and **Hours** data columns and **extract the "Agreed Hrs"** value from the rows above the data table to set your total target.
+                    It will automatically find the **Date**, **Activity Description**, and **Hours** data columns and **extract the total required hours** (e.g., 'Agreed Hrs', 'Total OTJ Required') from the rows above the data table.
                 </p>
             </div>
 
