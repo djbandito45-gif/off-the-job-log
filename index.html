@@ -70,20 +70,22 @@
             // --- MANDATORY FIREBASE CONFIGURATION USING GLOBAL VARIABLES ---
             appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
             let firebaseConfig = null;
+            let initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
             
             try {
-                // Check if the global variable exists and is a non-empty string before parsing
                 const configString = typeof __firebase_config !== 'undefined' ? __firebase_config : null;
                 
                 if (configString) {
                     firebaseConfig = JSON.parse(configString);
                 } else {
-                    throw new Error("The global Firebase configuration variable is missing or empty.");
+                    // Fallback configuration if global var is missing (CRITICAL FIX)
+                    console.warn("Using fallback Firebase configuration. Data persistence may be affected.");
+                    firebaseConfig = { apiKey: "dummy", authDomain: "dummy", projectId: "dummy" };
+                    initialAuthToken = null; // Ensure we sign in anonymously with dummy config
                 }
             } catch (e) {
                 console.error("Firebase config parsing failed:", e);
-                displayCriticalError("Firebase configuration is invalid or missing. The application cannot start.");
-                // Prevent further execution if config is bad
+                displayCriticalError("Firebase configuration is invalid or malformed JSON. The application cannot start.");
                 return; 
             }
 
@@ -98,12 +100,10 @@
                 auth = getAuth(app);
                 
                 // 1. Authenticate using the provided token or anonymously
-                const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
-                
                 if (initialAuthToken) {
                     await signInWithCustomToken(auth, initialAuthToken);
                 } else {
-                    // Fallback to anonymous sign-in if no custom token is provided
+                    // Fallback to anonymous sign-in if no custom token is provided or if using dummy config
                     await signInAnonymously(auth);
                 }
 
@@ -391,6 +391,12 @@
         function setupListeners() {
             if (!db || !userId) return;
             
+            // Only attach listener if Firebase is properly initialized (not using dummy config)
+            if (auth.app.options.apiKey === 'dummy') {
+                console.warn("Database connection skipped: Using dummy configuration.");
+                return;
+            }
+
             const q = query(collection(db, getCollectionPath()), orderBy("timestamp", "asc"));
 
             onSnapshot(q, (snapshot) => {
@@ -456,8 +462,8 @@
             // Wait for authentication before proceeding
             await dbReadyPromise;
             
-            if (!db || !userId) {
-                showNotification("Authentication failed. Please wait for initialization.", true);
+            if (!db || !userId || auth.app.options.apiKey === 'dummy') {
+                showNotification("Authentication failed or configuration missing. Cannot save data.", true);
                 return;
             }
 
@@ -497,8 +503,8 @@
                 return;
             }
 
-            if (!db || !userId) {
-                showNotification("Import failed: User not authenticated. Please wait for initialization.", true);
+            if (!db || !userId || auth.app.options.apiKey === 'dummy') {
+                showNotification("Import failed: Cannot save data because authentication or configuration is missing.", true);
                 return;
             }
             
@@ -531,20 +537,15 @@
                         showNotification("Import failed: Excel sheet is empty or has no data rows.", true);
                         return;
                     }
-
-                    // --- DEBUG STEP 1: Log the raw JSON structure ---
-                    console.log("--- DEBUG START: Raw JSON from Excel (Top 10 rows) ---");
-                    console.log(json.slice(0, 10));
-                    console.log("-----------------------------------------------------");
                     
                     let headerRowIndex = -1;
                     
                     // Keys we are looking for (case-insensitive)
                     const SEARCH_KEYS = {
                         date: ['date'],
-                        desc: ['activity description', 'description', 'activity'], // Added a more flexible description search
+                        desc: ['activity description', 'description', 'activity'], 
                         hours: ['hours', 'hr', 'off-the-job hours', 'otj hours'],
-                        agreedHrs: ['agreed hrs', 'agreedhrs', 'total otj required', 'total otj hours', 'totalhrs', 'calculated minimum hrs', '360 hrs needed'] // Consolidated keys
+                        agreedHrs: ['agreed hrs', 'agreedhrs', 'total otj required', 'total otj hours', 'totalhrs', 'calculated minimum hrs', '360 hrs needed'] 
                     };
 
                     // Function to normalize a cell value for comparison
@@ -561,10 +562,6 @@
                         
                         if (hasDate && hasHours) {
                             headerRowIndex = i;
-                            // --- DEBUG STEP 2: Log the detected header row index and content ---
-                            console.log(`--- DEBUG: Header Row Detected at Index: ${headerRowIndex} ---`);
-                            console.log(row);
-                            console.log("-----------------------------------------------------");
                             break;
                         }
                     }
@@ -600,9 +597,6 @@
                         }
                         if (totalHoursNeeded > 0) break;
                     }
-
-                    // --- DEBUG STEP 3: Log the extracted total hours needed ---
-                    console.log(`--- DEBUG: Extracted Total Hours Needed: ${totalHoursNeeded} ---`);
                     
                     if (totalHoursNeeded > 0) {
                         await saveMetadata({ totalHoursNeeded });
@@ -629,10 +623,6 @@
                         }
                     });
 
-                    // --- DEBUG STEP 4: Log the identified column indices ---
-                    console.log(`--- DEBUG: Column Indices ---`);
-                    console.log(`Date Col: ${dateCol}, Description Col: ${descCol}, Hours Col: ${hoursCol}, Job ID Col: ${jobIdCol}`);
-                    console.log("-------------------------------");
                     
                     if (dateCol === -1 || descCol === -1 || hoursCol === -1) {
                         showNotification("Import failed: Could not map 'Date', 'Activity Description', and 'Hours' columns in the header row.", true);
@@ -660,11 +650,6 @@
                         jobData.push({ date, description, hours, jobId });
                     }
                     
-                    // --- DEBUG STEP 5: Log the first few parsed entries ---
-                    console.log("--- DEBUG: First 5 Parsed Log Entries ---");
-                    console.log(jobData.slice(0, 5));
-                    console.log("-----------------------------------------");
-
                     let successCount = 0;
                     let failureCount = 0;
                     
