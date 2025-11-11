@@ -49,7 +49,7 @@
         // --- Firebase Core Setup and Auth (Encapsulated) ---
         (async function initFirebase() {
             // --- MANDATORY FIREBASE CONFIGURATION USING GLOBAL VARIABLES ---
-            const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+            appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
             let firebaseConfig = null;
             try {
                 firebaseConfig = JSON.parse(__firebase_config);
@@ -95,7 +95,7 @@
                         userId = null;
                         isAuthReady = true;
                         if (userIdEl) userIdEl.textContent = `User ID: (Unauthenticated)`;
-                        showNotification("Authentication failed. Please refresh.", true);
+                        // Removed error here to prevent notification spam if environment is still setting up
                     }
                     state.loading = false;
                     updateUI(); // Initial UI update after auth check
@@ -103,7 +103,6 @@
                 
             } catch (e) {
                 console.error("Firebase initialization failed:", e);
-                // Specifically targeting the configuration-not-found error with better logging
                 showNotification(`Initialization Error: ${e.message}. The Firebase configuration is likely incorrect.`, true);
                 const appEl = document.getElementById('app');
                 if (appEl) {
@@ -494,28 +493,29 @@
                     const data = new Uint8Array(e.target.result);
                     
                     // Parse the Excel file.
-                    // dateNF: "YYYY-MM-DD" ensures dates are parsed into a uniform string format
                     const workbook = XLSX.read(data, { type: 'array', dateNF: "YYYY-MM-DD" }); 
                     const sheetName = workbook.SheetNames[0]; 
                     const worksheet = workbook.Sheets[sheetName];
 
                     // raw: false is crucial for date formatting
-                    // header: 1 means interpret first row as headers, but since we have metadata, we use 1 and then manually find the header
                     const json = XLSX.utils.sheet_to_json(worksheet, { header: 1, raw: false, dateNF: "YYYY-MM-DD" }); 
                     
                     if (json.length < 2) {
                         showNotification("Import failed: Excel sheet is empty or has no data rows.", true);
                         return;
                     }
+
+                    // --- DEBUG STEP 1: Log the raw JSON structure ---
+                    console.log("--- DEBUG START: Raw JSON from Excel (Top 10 rows) ---");
+                    console.log(json.slice(0, 10));
+                    console.log("-----------------------------------------------------");
                     
                     let headerRowIndex = -1;
-                    
-                    // --- 1. FIND HEADER AND METADATA ---
                     
                     // Keys we are looking for (case-insensitive)
                     const SEARCH_KEYS = {
                         date: ['date'],
-                        hours: ['hours', 'hr', 'off-the-job hours'],
+                        hours: ['hours', 'hr', 'off-the-job hours', 'otj hours'],
                         agreedHrs: ['agreed hrs', 'agreedhrs', 'total otj required', 'totalhrs', 'calculated minimum hrs', '360 hrs needed', 'total otj hours']
                     };
 
@@ -533,6 +533,10 @@
                         
                         if (hasDate && hasHours) {
                             headerRowIndex = i;
+                            // --- DEBUG STEP 2: Log the detected header row index and content ---
+                            console.log(`--- DEBUG: Header Row Detected at Index: ${headerRowIndex} ---`);
+                            console.log(row);
+                            console.log("-----------------------------------------------------");
                             break;
                         }
                     }
@@ -553,7 +557,6 @@
                             
                             if (SEARCH_KEYS.agreedHrs.some(key => cellValue.includes(key))) {
                                 // Assume the value is in the next cell (j+1) or two cells over (j+2) for safety.
-                                // We'll try up to 4 columns after the key.
                                 for (let k = 1; k <= 4; k++) {
                                     if (row[j + k]) {
                                         const valueCandidate = String(row[j + k]).replace(/[^\d.]/g, ''); // Remove all non-numeric/non-dot chars
@@ -570,10 +573,12 @@
                         if (totalHoursNeeded > 0) break;
                     }
 
+                    // --- DEBUG STEP 3: Log the extracted total hours needed ---
+                    console.log(`--- DEBUG: Extracted Total Hours Needed: ${totalHoursNeeded} ---`);
+                    
                     if (totalHoursNeeded > 0) {
                         await saveMetadata({ totalHoursNeeded });
                         state.totalHoursNeeded = totalHoursNeeded;
-                        console.log(`Extracted and saved Total Hours Needed: ${totalHoursNeeded}`);
                     } else {
                         console.warn("Could not find 'Agreed Hrs' metadata value in the spreadsheet header area. Using default/existing value.");
                     }
@@ -595,8 +600,12 @@
                             jobIdCol = index;
                         }
                     });
+
+                    // --- DEBUG STEP 4: Log the identified column indices ---
+                    console.log(`--- DEBUG: Column Indices ---`);
+                    console.log(`Date Col: ${dateCol}, Description Col: ${descCol}, Hours Col: ${hoursCol}, Job ID Col: ${jobIdCol}`);
+                    console.log("-------------------------------");
                     
-                    // Note: Activity Description is often the second column in your CSV, which is column index 1.
                     if (dateCol === -1 || descCol === -1 || hoursCol === -1) {
                         showNotification("Import failed: Could not map 'Date', 'Activity Description', and 'Hours' columns in the header row.", true);
                         return;
@@ -618,6 +627,11 @@
                         jobData.push({ date, description, hoursStr, jobId });
                     }
                     
+                    // --- DEBUG STEP 5: Log the first few parsed entries ---
+                    console.log("--- DEBUG: First 5 Parsed Log Entries ---");
+                    console.log(jobData.slice(0, 5));
+                    console.log("-----------------------------------------");
+
                     let successCount = 0;
                     let failureCount = 0;
                     
