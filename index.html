@@ -1,0 +1,734 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Apprenticeship Off-the-Job Log</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* Custom styles for aesthetic */
+        body { font-family: 'Inter', sans-serif; background-color: #f7f7f9; }
+        .card { box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -2px rgba(0, 0, 0, 0.06); }
+        input[type="number"]::-webkit-inner-spin-button, 
+        input[type="number"]::-webkit-outer-spin-button {
+            -webkit-appearance: none;
+            margin: 0;
+        }
+        input[type="number"] {
+            -moz-appearance: textfield;
+        }
+    </style>
+    <!-- Load SheetJS for Excel reading/writing (MUST be loaded globally) -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+    <!-- Load Chart.js for the Pie Chart -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+
+    <!-- Load Firebase CDN Modules -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, setPersistence, browserLocalPersistence } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, addDoc, query, orderBy, onSnapshot, serverTimestamp, doc, getDoc, setDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore-lite.js";
+
+        // Global variables provided by the environment
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null;
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        let db, auth, userId = null;
+        let isAuthReady = false;
+        let chartInstance = null; // Variable to hold the Chart.js instance
+        
+        // Use an object to hold state instead of global variables scattered
+        const state = {
+            logEntries: [],
+            activeTab: 'logEntry',
+            loading: true,
+            error: null,
+            importMessage: null,
+            totalHoursNeeded: 0,
+        };
+
+        // --- Utility Functions ---
+        
+        function getCollectionPath() {
+            return `artifacts/${appId}/users/${userId}/job_logs`;
+        }
+        
+        function getMetadataDocRef() {
+             return doc(db, `artifacts/${appId}/users/${userId}/metadata/app_config`);
+        }
+        
+        async function saveMetadata(data) {
+            if (!db || !userId) return;
+            try {
+                await setDoc(getMetadataDocRef(), data, { merge: true });
+            } catch (e) {
+                console.error("Error saving metadata:", e);
+                showNotification(`Failed to save metadata: ${e.message}`, true);
+            }
+        }
+        
+        async function getMetadata() {
+            if (!db || !userId) return;
+            try {
+                const docSnap = await getDoc(getMetadataDocRef());
+                if (docSnap.exists()) {
+                    state.totalHoursNeeded = docSnap.data().totalHoursNeeded || 0;
+                }
+            } catch (e) {
+                console.error("Error fetching metadata:", e);
+            }
+        }
+
+        function updateUI() {
+            renderLogEntries();
+            document.getElementById('logEntryView').style.display = state.activeTab === 'logEntry' ? 'block' : 'none';
+            document.getElementById('importView').style.display = state.activeTab === 'importData' ? 'block' : 'none';
+            document.getElementById('summaryView').style.display = state.activeTab === 'summary' ? 'block' : 'none';
+
+            // Tab highlighting
+            document.getElementById('logEntryTab').classList.toggle('border-blue-500', state.activeTab === 'logEntry');
+            document.getElementById('logEntryTab').classList.toggle('text-blue-600', state.activeTab === 'logEntry');
+            document.getElementById('importTab').classList.toggle('border-blue-500', state.activeTab === 'importData');
+            document.getElementById('importTab').classList.toggle('text-blue-600', state.activeTab === 'importData');
+            document.getElementById('summaryTab').classList.toggle('border-blue-500', state.activeTab === 'summary');
+            document.getElementById('summaryTab').classList.toggle('text-blue-600', state.activeTab === 'summary');
+
+            // Render summary whenever state changes and tab is active
+            if (state.activeTab === 'summary') {
+                renderSummary();
+            }
+            
+            const logStatus = document.getElementById('logStatus');
+            if (state.error) {
+                logStatus.textContent = `Error: ${state.error}`;
+                logStatus.className = 'text-red-500 text-sm mt-2';
+            } else if (state.importMessage) {
+                logStatus.textContent = state.importMessage;
+                logStatus.className = 'text-green-500 text-sm mt-2';
+            } else {
+                logStatus.textContent = '';
+            }
+        }
+        
+        function renderLogEntries() {
+            const logList = document.getElementById('logList');
+            logList.innerHTML = '';
+            
+            if (state.loading) {
+                 logList.innerHTML = '<p class="text-center p-4 text-gray-500">Loading log entries...</p>';
+                 return;
+            }
+
+            if (state.logEntries.length === 0) {
+                logList.innerHTML = '<p class="text-center p-4 text-gray-500">No log entries found. Add one or import a file!</p>';
+                return;
+            }
+
+            // Reverse order so newest is on top
+            state.logEntries.slice().reverse().forEach(entry => {
+                const date = entry.date || new Date(entry.timestamp || Date.now()).toLocaleDateString();
+                const item = document.createElement('div');
+                item.className = 'bg-white p-4 mb-3 rounded-lg border border-gray-100 card transition duration-300 hover:shadow-lg';
+                item.innerHTML = `
+                    <div class="flex justify-between items-start">
+                        <div class="space-y-1">
+                            <p class="text-lg font-semibold text-gray-800">${entry.description || 'No Description'}</p>
+                            <p class="text-sm text-blue-600 font-medium">Job ID: ${entry.jobId || 'N/A'}</p>
+                        </div>
+                        <div class="text-right">
+                            <span class="text-2xl font-bold text-green-600">${entry.offTheJobHours || 0}h</span>
+                            <p class="text-xs text-gray-500">${date}</p>
+                        </div>
+                    </div>
+                `;
+                logList.appendChild(item);
+            });
+        }
+        
+        function showNotification(message, isError = false) {
+            state.error = isError ? message : null;
+            state.importMessage = isError ? null : message;
+            updateUI();
+            setTimeout(() => {
+                state.error = null;
+                state.importMessage = null;
+                updateUI();
+            }, 5000);
+        }
+
+        /**
+         * Calculates the number of working days (Mon-Fri) remaining in the current calendar year.
+         * This calculation excludes weekends.
+         * @returns {number} The number of working days remaining.
+         */
+        function calculateRemainingWorkingDays() {
+            const today = new Date();
+            const yearEnd = new Date(today.getFullYear(), 11, 31); // Dec 31st
+            let workingDays = 0;
+            let currentDate = new Date(today);
+
+            while (currentDate <= yearEnd) {
+                const day = currentDate.getDay();
+                // Check if it's Monday (1) through Friday (5)
+                if (day !== 0 && day !== 6) { 
+                    workingDays++;
+                }
+                currentDate.setDate(currentDate.getDate() + 1);
+            }
+            return workingDays;
+        }
+
+        // --- Summary Chart Rendering ---
+        function renderSummary() {
+            const ctx = document.getElementById('progressChart').getContext('2d');
+            const currentYear = new Date().getFullYear();
+            
+            // 1. Total Apprenticeship Hours
+            const totalHoursCompleted = state.logEntries.reduce((sum, entry) => sum + (entry.offTheJobHours || 0), 0);
+            const totalNeeded = state.totalHoursNeeded || 1100; // Default to 1100 if metadata not set
+            const hoursRemaining = Math.max(0, totalNeeded - totalHoursCompleted);
+            
+            // 2. Current Year Hours
+            const currentYearHoursCompleted = state.logEntries.filter(entry => {
+                const entryDate = new Date(entry.date);
+                return entryDate.getFullYear() === currentYear;
+            }).reduce((sum, entry) => sum + (entry.offTheJobHours || 0), 0);
+            
+            const remainingWorkingDays = calculateRemainingWorkingDays();
+
+
+            // Update summary data display (Total Progress)
+            document.getElementById('hoursCompleted').textContent = totalHoursCompleted.toFixed(1);
+            document.getElementById('hoursRemaining').textContent = hoursRemaining.toFixed(1);
+            document.getElementById('hoursTotalNeeded').textContent = totalNeeded.toFixed(1);
+            document.getElementById('progressPercentage').textContent = ((totalHoursCompleted / totalNeeded) * 100).toFixed(1);
+            
+            // Update summary data display (Yearly Context)
+            document.getElementById('currentYearHours').textContent = currentYearHoursCompleted.toFixed(1);
+            document.getElementById('remainingWorkingDays').textContent = remainingWorkingDays;
+
+
+            // Destroy existing chart if it exists
+            if (chartInstance) {
+                chartInstance.destroy();
+            }
+
+            chartInstance = new Chart(ctx, {
+                type: 'doughnut',
+                data: {
+                    labels: ['Hours Completed', 'Hours Remaining'],
+                    datasets: [{
+                        label: 'Apprenticeship Progress',
+                        data: [totalHoursCompleted, hoursRemaining],
+                        backgroundColor: [
+                            'rgba(16, 185, 129, 0.8)', // Green-500
+                            'rgba(59, 130, 246, 0.8)'  // Blue-500
+                        ],
+                        borderColor: [
+                            'rgba(255, 255, 255, 1)',
+                            'rgba(255, 255, 255, 1)'
+                        ],
+                        borderWidth: 2
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    plugins: {
+                        legend: {
+                            position: 'bottom',
+                            labels: {
+                                padding: 20,
+                                font: {
+                                    size: 14
+                                }
+                            }
+                        },
+                        title: {
+                            display: true,
+                            text: 'Total Apprenticeship Hour Progress',
+                            font: {
+                                size: 18
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        // --- Firebase Core Setup and Auth ---
+        window.onload = async function() {
+            if (!firebaseConfig) {
+                document.getElementById('app').innerHTML = '<p class="text-red-600 p-4 text-center">Firebase configuration is missing. Cannot initialize database.</p>';
+                return;
+            }
+            
+            try {
+                // setLogLevel('debug'); // Uncomment for debugging
+                const app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+                
+                // Use local persistence to keep user signed in across sessions
+                await setPersistence(auth, browserLocalPersistence);
+
+                // Authenticate user
+                if (initialAuthToken) {
+                    await signInWithCustomToken(auth, initialAuthToken);
+                } else {
+                    await signInAnonymously(auth);
+                }
+
+                onAuthStateChanged(auth, async (user) => {
+                    if (user) {
+                        userId = user.uid;
+                        isAuthReady = true;
+                        document.getElementById('userIdDisplay').textContent = `User ID: ${userId}`;
+                        await getMetadata(); // Load metadata first
+                        setupListeners();
+                    } else {
+                        userId = null;
+                        isAuthReady = true;
+                        console.log("No user signed in.");
+                        showNotification("Authentication failed. Please refresh.", true);
+                    }
+                    state.loading = false;
+                    updateUI();
+                });
+                
+            } catch (e) {
+                console.error("Firebase initialization failed:", e);
+                showNotification(`Initialization Error: ${e.message}`, true);
+            }
+        };
+
+        // --- Firestore Data Listeners ---
+        function setupListeners() {
+            if (!db || !userId) return;
+            
+            // Order by timestamp to maintain chronological view but fetch order
+            const q = query(collection(db, getCollectionPath()), orderBy("timestamp", "asc"));
+
+            onSnapshot(q, (snapshot) => {
+                const logs = [];
+                snapshot.forEach((doc) => {
+                    const data = doc.data();
+                    logs.push({ id: doc.id, ...data });
+                });
+                state.logEntries = logs;
+                state.loading = false;
+                updateUI();
+            }, (error) => {
+                console.error("Error fetching logs:", error);
+                showNotification(`Data Fetch Error: ${error.message}`, true);
+                state.loading = false;
+                updateUI();
+            });
+        }
+        
+        /**
+         * Converts log entry data into a spreadsheet format and triggers a download.
+         */
+        window.handleExport = function() {
+            if (state.logEntries.length === 0) {
+                showNotification("No data to export.", true);
+                return;
+            }
+
+            // 1. Define the desired column headers
+            const headers = [
+                "Date", 
+                "Activity Description", 
+                "Job ID", 
+                "Off-the-Job Hours"
+            ];
+
+            // 2. Map the state data to the spreadsheet structure
+            const exportData = state.logEntries.map(entry => ({
+                "Date": entry.date,
+                "Activity Description": entry.description,
+                "Job ID": entry.jobId,
+                "Off-the-Job Hours": entry.offTheJobHours,
+            }));
+
+            // 3. Create the worksheet and workbook
+            const ws = XLSX.utils.json_to_sheet(exportData, { header: headers });
+            const wb = XLSX.utils.book_new();
+            XLSX.utils.book_append_sheet(wb, ws, "Off-the-Job Log");
+
+            // 4. Trigger the download
+            const today = new Date().toISOString().slice(0, 10);
+            XLSX.writeFile(wb, `Apprenticeship_Log_${today}.xlsx`);
+            
+            showNotification("Data exported successfully!");
+        }
+
+        // --- Event Handlers & Logic ---
+        
+        window.switchTab = function(tabName) {
+            state.activeTab = tabName;
+            updateUI();
+        }
+
+        window.addJobLog = async function(event) {
+            event.preventDefault();
+            if (!db || !userId) {
+                showNotification("Database not ready. Please wait for authentication.", true);
+                return;
+            }
+
+            const form = event.target;
+            const newLog = {
+                jobId: form.jobId.value.trim() || 'N/A',
+                description: form.description.value.trim(),
+                offTheJobHours: parseFloat(form.hours.value) || 0,
+                date: form.date.value,
+                timestamp: new Date(form.date.value).getTime(),
+                serverTimestamp: serverTimestamp()
+            };
+            
+            if (!newLog.description || !newLog.offTheJobHours || !newLog.date) {
+                showNotification("Please fill in Description, Hours, and Date.", true);
+                return;
+            }
+            
+            try {
+                await addDoc(collection(db, getCollectionPath()), newLog);
+                form.reset();
+                showNotification("Log entry added successfully!");
+            } catch (e) {
+                console.error("Error adding document: ", e);
+                showNotification(`Failed to add log: ${e.message}`, true);
+            }
+        }
+        
+        window.handleImport = async function() {
+            if (typeof XLSX === 'undefined') {
+                showNotification("Excel library not loaded. Cannot process file.", true);
+                return;
+            }
+
+            if (!db || !userId) {
+                showNotification("Database not ready. Please wait for authentication.", true);
+                return;
+            }
+            
+            const fileInput = document.getElementById('excelFile');
+            if (fileInput.files.length === 0) {
+                showNotification("Please select an Excel file (.xlsx or .xls) to import.", true);
+                return;
+            }
+            
+            const file = fileInput.files[0];
+            const reader = new FileReader();
+
+            document.getElementById('importButton').disabled = true;
+            document.getElementById('importButton').textContent = 'Processing...';
+
+            reader.onload = async (e) => {
+                try {
+                    const data = new Uint8Array(e.target.result);
+                    
+                    // Parse the Excel file.
+                    const workbook = XLSX.read(data, { type: 'array', dateNF: "YYYY-MM-DD" }); 
+                    const sheetName = workbook.SheetNames[0]; 
+                    const worksheet = workbook.Sheets[sheetName];
+
+                    // raw: false is crucial for date formatting
+                    const json = XLSX.utils.sheet_to_json(worksheet, { header: 1, raw: false, dateNF: "YYYY-MM-DD" }); 
+                    
+                    if (json.length < 2) {
+                        showNotification("Import failed: Excel sheet is empty or has no data rows.", true);
+                        return;
+                    }
+                    
+                    let headerRowIndex = -1;
+                    
+                    // 1. Find the actual header row
+                    for (let i = 0; i < json.length; i++) {
+                        const row = json[i];
+                        const rowText = row.map(cell => String(cell || '').toLowerCase()).join('|'); 
+                        
+                        if (rowText.includes('date') && rowText.includes('hour')) {
+                            headerRowIndex = i;
+                            break;
+                        }
+                    }
+
+                    if (headerRowIndex === -1) {
+                         showNotification("Import failed: Could not find the required header row ('Date' and 'Hours').", true);
+                         return;
+                    }
+                    
+                    // 2. Extract Total Agreed Hours from Metadata Rows (Before header)
+                    let totalHoursNeeded = 0;
+                    const AGREED_HRS_KEY = 'agreed hrs';
+                    const AGREED_HRS_VALUE_COL = 6; 
+                    
+                    for (let i = 0; i < headerRowIndex; i++) {
+                        const row = json[i];
+                        // Check column F (index 5) for "Agreed Hrs"
+                        if (String(row[5] || '').toLowerCase().includes(AGREED_HRS_KEY)) {
+                            // The value is in column G (index 6)
+                            totalHoursNeeded = parseFloat(String(row[AGREED_HRS_VALUE_COL] || '0').replace(',', '.'));
+                            break;
+                        }
+                    }
+
+                    if (totalHoursNeeded > 0) {
+                        await saveMetadata({ totalHoursNeeded });
+                        state.totalHoursNeeded = totalHoursNeeded;
+                    } else {
+                        console.warn("Could not find 'Agreed Hrs' metadata value in the spreadsheet header area. Using default/existing value.");
+                    }
+                    
+                    // 3. Process job log data
+                    const DATE_COL = 0; 
+                    const DESC_COL = 1; 
+                    const HOURS_COL = 6; 
+                    
+                    let jobData = [];
+                    for (let i = headerRowIndex + 1; i < json.length; i++) {
+                        const row = json[i];
+                        
+                        if (row.length === 0 || (!row[DATE_COL] && !row[DESC_COL] && !row[HOURS_COL])) {
+                            continue;
+                        }
+
+                        const date = row[DATE_COL] ? String(row[DATE_COL]).trim() : '';
+                        const description = row[DESC_COL] ? String(row[DESC_COL]).trim() : '';
+                        const hoursStr = row[HOURS_COL] ? String(row[HOURS_COL]).trim() : '0';
+                        
+                        jobData.push({ date, description, hoursStr });
+                    }
+                    
+                    let successCount = 0;
+                    let failureCount = 0;
+                    
+                    // 4. Upload to Firestore
+                    for (const item of jobData) {
+                        const jobId = 'N/A';
+                        const description = item.description;
+                        const hours = parseFloat(item.hoursStr.replace(',', '.')) || 0; 
+                        const date = item.date;
+
+                        if (description && hours > 0 && date && Date.parse(date)) {
+                            try {
+                                const logEntry = {
+                                    jobId: jobId,
+                                    description: description,
+                                    offTheJobHours: hours,
+                                    date: date, 
+                                    timestamp: new Date(date).getTime(), 
+                                    serverTimestamp: serverTimestamp()
+                                };
+                                await addDoc(collection(db, getCollectionPath()), logEntry);
+                                successCount++;
+                            } catch (e) {
+                                console.error("Error importing document: ", e);
+                                failureCount++;
+                            }
+                        } else {
+                            if (description || hours > 0 || date) {
+                                failureCount++;
+                            }
+                        }
+                    }
+                    
+                    showNotification(`Import Complete: ${successCount} entries added, ${failureCount} entries skipped (missing required data or bad format).`);
+                    window.switchTab('summary'); // Switch to summary view after successful import
+
+                } catch (e) {
+                    console.error("Error processing Excel file:", e);
+                    showNotification(`Import Error: Could not process file. Ensure it is a valid Excel file and the first sheet contains data. (${e.message})`, true);
+                } finally {
+                    document.getElementById('importButton').disabled = false;
+                    document.getElementById('importButton').textContent = 'Start Import';
+                    fileInput.value = ''; // Clear file input
+                }
+            };
+
+            reader.onerror = () => {
+                showNotification("Error reading file.", true);
+                document.getElementById('importButton').disabled = false;
+                document.getElementById('importButton').textContent = 'Start Import';
+            };
+
+            reader.readAsArrayBuffer(file);
+        }
+
+        // Initialize UI with initial state
+        document.addEventListener('DOMContentLoaded', updateUI);
+
+    </script>
+</head>
+<body class="p-0 sm:p-4 bg-gray-50 min-h-screen">
+
+    <div id="app" class="max-w-xl mx-auto bg-white sm:rounded-xl shadow-lg overflow-hidden">
+        
+        <!-- Header -->
+        <header class="bg-blue-600 text-white p-4">
+            <h1 class="text-2xl font-bold text-center">Apprenticeship Log</h1>
+            <p id="userIdDisplay" class="text-xs text-center opacity-75 mt-1"></p>
+        </header>
+
+        <!-- Tab Navigation -->
+        <div class="flex border-b border-gray-200">
+            <button id="logEntryTab" onclick="switchTab('logEntry')" 
+                    class="flex-1 py-3 text-center text-sm font-medium border-b-2 border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700">
+                Log New Entry
+            </button>
+            <button id="importTab" onclick="switchTab('importData')" 
+                    class="flex-1 py-3 text-center text-sm font-medium border-b-2 border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700">
+                Import Data
+            </button>
+            <button id="summaryTab" onclick="switchTab('summary')" 
+                    class="flex-1 py-3 text-center text-sm font-medium border-b-2 border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700">
+                Progress Summary
+            </button>
+        </div>
+
+        <!-- Notification Bar -->
+        <div class="p-4 pt-2">
+            <div id="logStatus" role="alert"></div>
+        </div>
+
+        <!-- Log Entry View -->
+        <div id="logEntryView" class="p-4 space-y-4">
+            <form id="logForm" onsubmit="addJobLog(event)" class="bg-gray-50 p-4 rounded-lg card mb-6">
+                <div class="grid grid-cols-2 gap-4">
+                    <!-- Job ID -->
+                    <div class="col-span-2 sm:col-span-1">
+                        <label for="jobId" class="block text-sm font-medium text-gray-700">Job/Project ID (Optional)</label>
+                        <input type="text" id="jobId" name="jobId" placeholder="e.g., INV-1045"
+                               class="mt-1 block w-full rounded-md border-gray-300 shadow-sm p-2 border focus:border-blue-500 focus:ring-blue-500">
+                    </div>
+                    <!-- Date -->
+                    <div class="col-span-2 sm:col-span-1">
+                        <label for="date" class="block text-sm font-medium text-gray-700">Date</label>
+                        <input type="date" id="date" name="date" required
+                               class="mt-1 block w-full rounded-md border-gray-300 shadow-sm p-2 border focus:border-blue-500 focus:ring-blue-500">
+                    </div>
+                    <!-- Hours -->
+                    <div class="col-span-2">
+                        <label for="hours" class="block text-sm font-medium text-gray-700">Off-the-Job Hours</label>
+                        <input type="number" id="hours" name="hours" step="0.5" min="0.5" required
+                               placeholder="2.5"
+                               class="mt-1 block w-full rounded-md border-gray-300 shadow-sm p-2 border focus:border-blue-500 focus:ring-blue-500">
+                    </div>
+                    <!-- Description -->
+                    <div class="col-span-2">
+                        <label for="description" class="block text-sm font-medium text-gray-700">Activity Description (What did you do?)</label>
+                        <textarea id="description" name="description" rows="3" required
+                                  placeholder="E.g., Researching new coding standard, creating training slides, mandatory reading."
+                                  class="mt-1 block w-full rounded-md border-gray-300 shadow-sm p-2 border focus:border-blue-500 focus:ring-blue-500"></textarea>
+                    </div>
+                </div>
+                
+                <button type="submit"
+                        class="mt-4 w-full flex justify-center py-2 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-green-600 hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500 transition duration-150">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 mr-2" viewBox="0 0 20 20" fill="currentColor">
+                        <path fill-rule="evenodd" d="M10 5a1 1 0 011 1v3h3a1 1 0 110 2h-3v3a1 1 0 11-2 0v-3H6a1 1 0 110-2h3V6a1 1 0 011-1z" clip-rule="evenodd" />
+                    </svg>
+                    Add Log Entry
+                </button>
+            </form>
+
+            <h2 class="text-xl font-semibold text-gray-800 border-b pb-2">Recent Log History</h2>
+            
+            <!-- Export Button -->
+            <button onclick="handleExport()"
+                    class="w-full flex justify-center items-center py-2 px-4 border border-blue-500 rounded-md shadow-sm text-sm font-medium text-blue-600 bg-white hover:bg-blue-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 transition duration-150 mb-4">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                </svg>
+                Export Data to Excel
+            </button>
+
+            <div id="logList" class="pt-2">
+                <!-- Log entries will be inserted here by renderLogEntries() -->
+            </div>
+        </div>
+
+        <!-- Data Import View -->
+        <div id="importView" class="p-6 space-y-6" style="display:none;">
+            <div class="bg-yellow-50 border-l-4 border-yellow-400 p-4 rounded-lg">
+                <h3 class="font-semibold text-yellow-800">Import Instructions</h3>
+                <p class="text-sm text-yellow-700 mt-1">
+                    Upload your Excel workbook (.xlsx or .xls). The app will process the **first sheet**.
+                </p>
+                <p class="text-sm text-yellow-700 mt-1">
+                    It will automatically find the `Date`, `Activity Description`, and `Hours` data columns and **also extract the "Agreed Hrs" value** from the metadata rows to track your total target.
+                </p>
+            </div>
+
+            <label for="excelFile" class="block text-sm font-medium text-gray-700">
+                Upload Excel File (.xlsx or .xls)
+            </label>
+            <input type="file" id="excelFile" accept=".xlsx, .xls" class="w-full text-sm text-gray-500
+                file:mr-4 file:py-2 file:px-4
+                file:rounded-full file:border-0
+                file:text-sm file:font-semibold
+                file:bg-blue-50 file:text-blue-700
+                hover:file:bg-blue-100">
+
+            <button id="importButton" onclick="handleImport()"
+                    class="w-full flex justify-center py-2 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 transition duration-150">
+                Start Import
+            </button>
+        </div>
+        
+        <!-- Summary View -->
+        <div id="summaryView" class="p-6 space-y-6" style="display:none;">
+            <h2 class="text-xl font-bold text-gray-800 text-center mb-4">Total Apprenticeship Progress</h2>
+            
+            <!-- Total Progress Section -->
+            <div class="grid grid-cols-3 gap-3 text-center bg-gray-50 p-3 rounded-lg border">
+                <div class="p-2 rounded-lg">
+                    <p class="text-xs text-gray-500">Total Required</p>
+                    <p class="text-lg font-extrabold text-gray-700" id="hoursTotalNeeded">0.0</p>
+                </div>
+                <div class="bg-green-100 p-2 rounded-lg">
+                    <p class="text-xs text-green-600">Completed</p>
+                    <p class="text-lg font-extrabold text-green-700" id="hoursCompleted">0.0</p>
+                </div>
+                <div class="bg-blue-100 p-2 rounded-lg">
+                    <p class="text-xs text-blue-600">Remaining</p>
+                    <p class="text-lg font-extrabold text-blue-700" id="hoursRemaining">0.0</p>
+                </div>
+            </div>
+
+            <!-- Pie Chart -->
+            <div class="relative max-w-sm mx-auto p-4 bg-white rounded-xl card">
+                <div class="absolute inset-0 flex items-center justify-center opacity-80 pointer-events-none">
+                    <span class="text-4xl font-black text-gray-800">
+                        <span id="progressPercentage">0.0</span>%
+                    </span>
+                </div>
+                <!-- Doughnut Chart Canvas -->
+                <canvas id="progressChart" class="w-full h-auto"></canvas>
+            </div>
+            
+            <!-- Yearly Progress Section -->
+            <h3 class="text-lg font-bold text-gray-800 text-center border-t pt-6 mt-6">Current Year Context (${new Date().getFullYear()})</h3>
+
+            <div class="grid grid-cols-2 gap-4 text-center">
+                <div class="bg-purple-100 p-4 rounded-lg">
+                    <p class="text-2xl font-extrabold text-purple-700" id="currentYearHours">0.0</p>
+                    <p class="text-sm text-purple-600">Hours Logged This Year</p>
+                </div>
+                <div class="bg-red-100 p-4 rounded-lg">
+                    <p class="text-2xl font-extrabold text-red-700" id="remainingWorkingDays">0</p>
+                    <p class="text-sm text-red-600">Working Days Left</p>
+                </div>
+            </div>
+            
+            <p class="text-xs text-gray-500 pt-4 text-center">
+                The Working Days Left estimate excludes weekends and gives you a planning timeline until Dec 31st.
+            </p>
+        </div>
+
+    </div>
+</body>
+</html>
