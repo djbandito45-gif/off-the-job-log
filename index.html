@@ -26,15 +26,26 @@
     <!-- Load Firebase CDN Modules -->
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
-        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, setPersistence, browserLocalPersistence } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getAuth, signInAnonymously, onAuthStateChanged, setPersistence, browserLocalPersistence } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
         import { getFirestore, collection, addDoc, query, orderBy, onSnapshot, serverTimestamp, doc, getDoc, setDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
         import { setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore-lite.js";
 
-        // Global variables provided by the environment
-        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
-        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null;
-        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
-
+        // --- HARD-CODED FIREBASE CONFIGURATION ---
+        // This configuration uses the keys you provided. 
+        // It is required for the app to initialize the database connection on GitHub Pages.
+        const firebaseConfig = {
+          apiKey: "AIzaSyCYjp_KTHFc8zAdf4WAbXtNjw-WGJIjE6A",
+          authDomain: "off-the-job-log.firebaseapp.com",
+          projectId: "off-the-job-log",
+          storageBucket: "off-the-job-log.firebasestorage.app",
+          messagingSenderId: "543791232927",
+          appId: "1:543791232927:web:cb2113616fdfca509c6faa",
+          measurementId: "G-XJ7DDG1D1T"
+        };
+        
+        // Use the project ID as the app identifier since we are outside the canvas environment.
+        const appId = firebaseConfig.projectId; 
+        
         let db, auth, userId = null;
         let isAuthReady = false;
         let chartInstance = null; // Variable to hold the Chart.js instance
@@ -52,6 +63,7 @@
         // --- Utility Functions ---
         
         function getCollectionPath() {
+            // Note: Data is now stored in a custom path using the Project ID as the App ID.
             return `artifacts/${appId}/users/${userId}/job_logs`;
         }
         
@@ -74,6 +86,7 @@
             try {
                 const docSnap = await getDoc(getMetadataDocRef());
                 if (docSnap.exists()) {
+                    // TotalHoursNeeded is loaded from Firestore, or defaults to 0 if not present
                     state.totalHoursNeeded = docSnap.data().totalHoursNeeded || 0;
                 }
             } catch (e) {
@@ -187,7 +200,8 @@
             
             // 1. Total Apprenticeship Hours
             const totalHoursCompleted = state.logEntries.reduce((sum, entry) => sum + (entry.offTheJobHours || 0), 0);
-            const totalNeeded = state.totalHoursNeeded || 1100; // Default to 1100 if metadata not set
+            // If totalHoursNeeded is 0 (i.e., not yet imported/set), use a safe default like 1100 to prevent division by zero.
+            const totalNeeded = state.totalHoursNeeded > 0 ? state.totalHoursNeeded : 1100; 
             const hoursRemaining = Math.max(0, totalNeeded - totalHoursCompleted);
             
             // 2. Current Year Hours
@@ -203,7 +217,8 @@
             document.getElementById('hoursCompleted').textContent = totalHoursCompleted.toFixed(1);
             document.getElementById('hoursRemaining').textContent = hoursRemaining.toFixed(1);
             document.getElementById('hoursTotalNeeded').textContent = totalNeeded.toFixed(1);
-            document.getElementById('progressPercentage').textContent = ((totalHoursCompleted / totalNeeded) * 100).toFixed(1);
+            const progressPercentage = (totalHoursCompleted / totalNeeded) * 100;
+            document.getElementById('progressPercentage').textContent = progressPercentage.toFixed(1);
             
             // Update summary data display (Yearly Context)
             document.getElementById('currentYearHours').textContent = currentYearHoursCompleted.toFixed(1);
@@ -221,6 +236,7 @@
                     labels: ['Hours Completed', 'Hours Remaining'],
                     datasets: [{
                         label: 'Apprenticeship Progress',
+                        // Ensure data sums to 100% or total needed
                         data: [totalHoursCompleted, hoursRemaining],
                         backgroundColor: [
                             'rgba(16, 185, 129, 0.8)', // Green-500
@@ -266,19 +282,16 @@
             
             try {
                 // setLogLevel('debug'); // Uncomment for debugging
+                console.log("Attempting Firebase initialization with project ID:", firebaseConfig.projectId);
                 const app = initializeApp(firebaseConfig);
                 db = getFirestore(app);
                 auth = getAuth(app);
                 
-                // Use local persistence to keep user signed in across sessions
-                await setPersistence(auth, browserLocalPersistence);
-
-                // Authenticate user
-                if (initialAuthToken) {
-                    await signInWithCustomToken(auth, initialAuthToken);
-                } else {
-                    await signInAnonymously(auth);
-                }
+                // --- AUTHENTICATION UPDATE FOR GITHUB PAGES ---
+                // Removed setPersistence to eliminate potential domain/iframe security conflicts
+                // that might cause the 'auth/configuration-not-found' error.
+                // Since there is no initial token, we sign in anonymously.
+                await signInAnonymously(auth);
 
                 onAuthStateChanged(auth, async (user) => {
                     if (user) {
@@ -314,7 +327,9 @@
                 const logs = [];
                 snapshot.forEach((doc) => {
                     const data = doc.data();
-                    logs.push({ id: doc.id, ...data });
+                    // Ensure the date is a string for consistent rendering
+                    const dateString = data.date && typeof data.date === 'string' ? data.date : new Date(data.timestamp).toLocaleDateString();
+                    logs.push({ id: doc.id, date: dateString, ...data });
                 });
                 state.logEntries = logs;
                 state.loading = false;
@@ -379,12 +394,14 @@
             }
 
             const form = event.target;
+            const dateValue = form.date.value;
+            
             const newLog = {
                 jobId: form.jobId.value.trim() || 'N/A',
                 description: form.description.value.trim(),
                 offTheJobHours: parseFloat(form.hours.value) || 0,
-                date: form.date.value,
-                timestamp: new Date(form.date.value).getTime(),
+                date: dateValue,
+                timestamp: new Date(dateValue).getTime(),
                 serverTimestamp: serverTimestamp()
             };
             
@@ -431,11 +448,13 @@
                     const data = new Uint8Array(e.target.result);
                     
                     // Parse the Excel file.
+                    // dateNF: "YYYY-MM-DD" ensures dates are parsed into a uniform string format
                     const workbook = XLSX.read(data, { type: 'array', dateNF: "YYYY-MM-DD" }); 
                     const sheetName = workbook.SheetNames[0]; 
                     const worksheet = workbook.Sheets[sheetName];
 
                     // raw: false is crucial for date formatting
+                    // header: 1 means interpret first row as headers, but since we have metadata, we use 1 and then manually find the header
                     const json = XLSX.utils.sheet_to_json(worksheet, { header: 1, raw: false, dateNF: "YYYY-MM-DD" }); 
                     
                     if (json.length < 2) {
@@ -445,12 +464,27 @@
                     
                     let headerRowIndex = -1;
                     
-                    // 1. Find the actual header row
+                    // --- 1. FIND HEADER AND METADATA ---
+                    
+                    // Keys we are looking for (case-insensitive)
+                    const SEARCH_KEYS = {
+                        date: ['date'],
+                        hours: ['hours'],
+                        agreedHrs: ['agreed hrs', 'agreedhrs', 'total otj required', 'totalhrs', 'calculated minimum hrs']
+                    };
+
+                    // Function to normalize a cell value for comparison
+                    const normalizeCell = (cell) => String(cell || '').trim().toLowerCase().replace(/[^a-z0-9]/g, '');
+
+                    // Find the actual header row (row containing 'Date' and 'Hours')
                     for (let i = 0; i < json.length; i++) {
                         const row = json[i];
-                        const rowText = row.map(cell => String(cell || '').toLowerCase()).join('|'); 
+                        const rowKeys = row.map(normalizeCell);
                         
-                        if (rowText.includes('date') && rowText.includes('hour')) {
+                        const hasDate = rowKeys.some(key => SEARCH_KEYS.date.some(sk => key.includes(sk)));
+                        const hasHours = rowKeys.some(key => SEARCH_KEYS.hours.some(sk => key.includes(sk)));
+                        
+                        if (hasDate && hasHours) {
                             headerRowIndex = i;
                             break;
                         }
@@ -463,42 +497,73 @@
                     
                     // 2. Extract Total Agreed Hours from Metadata Rows (Before header)
                     let totalHoursNeeded = 0;
-                    const AGREED_HRS_KEY = 'agreed hrs';
-                    const AGREED_HRS_VALUE_COL = 6; 
                     
                     for (let i = 0; i < headerRowIndex; i++) {
                         const row = json[i];
-                        // Check column F (index 5) for "Agreed Hrs"
-                        if (String(row[5] || '').toLowerCase().includes(AGREED_HRS_KEY)) {
-                            // The value is in column G (index 6)
-                            totalHoursNeeded = parseFloat(String(row[AGREED_HRS_VALUE_COL] || '0').replace(',', '.'));
-                            break;
+                        
+                        for (let j = 0; j < row.length; j++) {
+                            const cellValue = normalizeCell(row[j]);
+                            
+                            if (SEARCH_KEYS.agreedHrs.some(key => cellValue.includes(key))) {
+                                // Assume the value is in the next cell (j+1) or two cells over (j+2) for safety.
+                                // We'll try up to 4 columns after the key.
+                                for (let k = 1; k <= 4; k++) {
+                                    if (row[j + k]) {
+                                        const valueCandidate = String(row[j + k]).replace(/[^\d.]/g, ''); // Remove all non-numeric/non-dot chars
+                                        const parsedValue = parseFloat(valueCandidate);
+                                        if (!isNaN(parsedValue) && parsedValue > 0) {
+                                            totalHoursNeeded = parsedValue;
+                                            break;
+                                        }
+                                    }
+                                }
+                                if (totalHoursNeeded > 0) break; 
+                            }
                         }
+                        if (totalHoursNeeded > 0) break;
                     }
 
                     if (totalHoursNeeded > 0) {
                         await saveMetadata({ totalHoursNeeded });
                         state.totalHoursNeeded = totalHoursNeeded;
+                        console.log(`Extracted and saved Total Hours Needed: ${totalHoursNeeded}`);
                     } else {
                         console.warn("Could not find 'Agreed Hrs' metadata value in the spreadsheet header area. Using default/existing value.");
                     }
                     
                     // 3. Process job log data
-                    const DATE_COL = 0; 
-                    const DESC_COL = 1; 
-                    const HOURS_COL = 6; 
+                    const headers = json[headerRowIndex];
+                    let dateCol = -1, descCol = -1, hoursCol = -1;
+                    
+                    // Identify column indices based on normalized headers
+                    headers.forEach((header, index) => {
+                        const normalizedHeader = normalizeCell(header);
+                        if (SEARCH_KEYS.date.some(key => normalizedHeader.includes(key))) {
+                            dateCol = index;
+                        } else if (normalizedHeader.includes('activitydescription')) {
+                            descCol = index;
+                        } else if (SEARCH_KEYS.hours.some(key => normalizedHeader.includes(key))) {
+                            hoursCol = index;
+                        }
+                    });
+                    
+                    if (dateCol === -1 || descCol === -1 || hoursCol === -1) {
+                        showNotification("Import failed: Could not map 'Date', 'Activity Description', and 'Hours' columns in the header row.", true);
+                        return;
+                    }
                     
                     let jobData = [];
                     for (let i = headerRowIndex + 1; i < json.length; i++) {
                         const row = json[i];
                         
-                        if (row.length === 0 || (!row[DATE_COL] && !row[DESC_COL] && !row[HOURS_COL])) {
+                        if (row.length === 0 || (!row[dateCol] && !row[descCol] && !row[hoursCol])) {
                             continue;
                         }
 
-                        const date = row[DATE_COL] ? String(row[DATE_COL]).trim() : '';
-                        const description = row[DESC_COL] ? String(row[DESC_COL]).trim() : '';
-                        const hoursStr = row[HOURS_COL] ? String(row[HOURS_COL]).trim() : '0';
+                        const date = row[dateCol] ? String(row[dateCol]).trim() : '';
+                        const description = row[descCol] ? String(row[descCol]).trim() : '';
+                        // Clean up hours string: replace comma with dot, remove non-numeric except dot
+                        const hoursStr = row[hoursCol] ? String(row[hoursCol]).trim().replace(',', '.') : '0';
                         
                         jobData.push({ date, description, hoursStr });
                     }
@@ -510,7 +575,7 @@
                     for (const item of jobData) {
                         const jobId = 'N/A';
                         const description = item.description;
-                        const hours = parseFloat(item.hoursStr.replace(',', '.')) || 0; 
+                        const hours = parseFloat(item.hoursStr) || 0; 
                         const date = item.date;
 
                         if (description && hours > 0 && date && Date.parse(date)) {
@@ -530,6 +595,7 @@
                                 failureCount++;
                             }
                         } else {
+                            // Only count as failure if there was partial data present (i.e. not a completely empty row)
                             if (description || hours > 0 || date) {
                                 failureCount++;
                             }
@@ -570,7 +636,7 @@
         <!-- Header -->
         <header class="bg-blue-600 text-white p-4">
             <h1 class="text-2xl font-bold text-center">Apprenticeship Log</h1>
-            <p id="userIdDisplay" class="text-xs text-center opacity-75 mt-1"></p>
+            <p id="userIdDisplay" class="text-xs text-center opacity-75 mt-1">Authenticating...</p>
         </header>
 
         <!-- Tab Navigation -->
@@ -659,7 +725,7 @@
                     Upload your Excel workbook (.xlsx or .xls). The app will process the **first sheet**.
                 </p>
                 <p class="text-sm text-yellow-700 mt-1">
-                    It will automatically find the `Date`, `Activity Description`, and `Hours` data columns and **also extract the "Agreed Hrs" value** from the metadata rows to track your total target.
+                    It will automatically find the **Date**, **Activity Description**, and **Hours** data columns and **extract the "Agreed Hrs"** value from the rows above the data table to set your total target.
                 </p>
             </div>
 
